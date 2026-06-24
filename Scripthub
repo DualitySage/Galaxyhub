@@ -1,0 +1,687 @@
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+while not LocalPlayer do
+    task.wait()
+    LocalPlayer = Players.LocalPlayer
+end
+
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui", 10)
+if not PlayerGui then 
+    error("Failed to find PlayerGui. Game might be lagging.")
+end
+
+if PlayerGui:FindFirstChild("CustomCommandBarGui") then
+    PlayerGui.CustomCommandBarGui:Destroy()
+end
+
+local TOGGLE_KEY = Enum.KeyCode.Quote
+local TRANSPARENCY_VAL = 0.5 
+
+local state = {
+    loopSpeed = nil,
+    loopJump = nil,
+    isFlying = false,
+    flySpeed = 50,
+    isNoclipping = false,
+    isClickTPing = false,
+    isSpinning = false,
+    spinSpeed = 100,
+    flyBV = nil,
+    flyBG = nil,
+    spinVelocity = nil,
+    flingPart = nil,
+    clickConnection = nil,
+    infJumpConnection = nil,
+    whitelistedUsers = {} -- Tracks green highlighted immune users
+}
+
+-- Core Physics Pipeline (Loops, Flight Frame Stability, Collisions, Multi-Jump)
+RunService.Stepped:Connect(function()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    
+    -- Dynamic Parameter Variable Locks
+    if hum then
+        if state.loopSpeed then hum.WalkSpeed = state.loopSpeed end
+        if state.loopJump then 
+            hum.JumpPower = state.loopJump 
+            hum.UseJumpPower = true 
+        end
+    end
+    
+    -- Camera-Relative Frozen Inertia Static Flight System
+    if state.isFlying and root and hum then
+        hum.PlatformStand = true
+        local cam = workspace.CurrentCamera
+        local moveDirection = Vector3.new()
+        
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDirection += cam.CFrame.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDirection -= cam.CFrame.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDirection -= cam.CFrame.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDirection += cam.CFrame.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then moveDirection += Vector3.new(0, 1, 0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then moveDirection -= Vector3.new(0, 1, 0) end
+        
+        if moveDirection.Magnitude > 0 then
+            state.flyBV.Velocity = moveDirection.Unit * state.flySpeed
+        else
+            state.flyBV.Velocity = Vector3.new(0, 0, 0) -- Instant zero-friction stall
+        end
+        state.flyBG.CFrame = cam.CFrame
+    end
+    
+    -- Noclip Workspace Collision Layer Bypass
+    if state.isNoclipping then
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
+            end
+        end
+    end
+end)
+
+-- Helper Functions
+local function stopFlying()
+    state.isFlying = false
+    if state.flyBV then state.flyBV:Destroy() state.flyBV = nil end
+    if state.flyBG then state.flyBG:Destroy() state.flyBG = nil end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then hum.PlatformStand = false end
+end
+
+local function stopClickTP()
+    state.isClickTPing = false
+    if state.clickConnection then
+        state.clickConnection:Disconnect()
+        state.clickConnection = nil
+    end
+end
+
+local function stopSpinning()
+    state.isSpinning = false
+    if state.spinVelocity then state.spinVelocity:Destroy() state.spinVelocity = nil end
+    if state.spinGyro then state.spinGyro:Destroy() state.spinGyro = nil end
+    if state.flingPart then state.flingPart:Destroy() state.flingPart = nil end
+    local att = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and LocalPlayer.Character.HumanoidRootPart:FindFirstChild("SpinAttachment")
+    if att then att:Destroy() end
+end
+
+-- 1. Create Core ScreenGui
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "CustomCommandBarGui"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = PlayerGui
+
+-- 2. Main Input Command Bar Container
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 400, 0, 40)
+MainFrame.Position = UDim2.new(0.5, -200, 1, -110) -- Shifted down safely right above layout inventory
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+MainFrame.BorderSizePixel = 0
+MainFrame.BackgroundTransparency = 1 
+MainFrame.Visible = false
+MainFrame.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 6)
+MainCorner.Parent = MainFrame
+
+local UIStroke = Instance.new("UIStroke")
+UIStroke.Color = Color3.fromRGB(60, 60, 60)
+UIStroke.Thickness = 1
+UIStroke.Transparency = 1
+UIStroke.Parent = MainFrame
+
+-- 3. Interactive TextBox
+local TextBox = Instance.new("TextBox")
+TextBox.Name = "CommandInput"
+TextBox.Size = UDim2.new(1, -30, 1, 0)
+TextBox.Position = UDim2.new(0, 15, 0, 0)
+TextBox.BackgroundTransparency = 1
+TextBox.Text = ""
+TextBox.PlaceholderText = "Enter command here..."
+TextBox.PlaceholderColor3 = Color3.fromRGB(150, 150, 150)
+TextBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+TextBox.TextSize = 16
+TextBox.Font = Enum.Font.SourceSans
+TextBox.TextXAlignment = Enum.TextXAlignment.Left
+TextBox.ClearTextOnFocus = false
+TextBox.TextTransparency = 1
+TextBox.Parent = MainFrame
+
+-- 4. Command Suggestion Backdrop Label
+local SuggestionLabel = Instance.new("TextLabel")
+SuggestionLabel.Name = "SuggestionLabel"
+SuggestionLabel.Size = TextBox.Size
+SuggestionLabel.Position = TextBox.Position
+SuggestionLabel.BackgroundTransparency = 1
+SuggestionLabel.Text = ""
+SuggestionLabel.TextColor3 = Color3.fromRGB(120, 120, 120)
+SuggestionLabel.TextSize = 16
+SuggestionLabel.Font = Enum.Font.SourceSans
+SuggestionLabel.TextXAlignment = Enum.TextXAlignment.Left
+SuggestionLabel.TextTransparency = 1
+SuggestionLabel.ZIndex = TextBox.ZIndex - 1
+SuggestionLabel.Parent = MainFrame
+
+-- Structured Central Master Command Dictionary
+local commandDatabase = {
+    { displayName = "Commands", name = "commands", aliases = {"cmds"}, description = "Shows complete list of commands" },
+    { displayName = "Speed", name = "speed", aliases = {"ws"}, description = "Sets player's speed" },
+    { displayName = "Jumppower", name = "jumppower", aliases = {"jp"}, description = "Sets player's jump height" },
+    { displayName = "Loopws", name = "loopws", aliases = {}, description = "Loops player's speed." },
+    { displayName = "Loopjp", name = "loopjp", aliases = {}, description = "Loops player's jump height." },
+    { displayName = "Unloopws", name = "unloopws", aliases = {}, description = "Turns off loop speed settings." },
+    { displayName = "Unloopjp", name = "unloopjp", aliases = {}, description = "Turns off loop jump settings." },
+    { displayName = "Fly", name = "fly", aliases = {}, description = "Makes the player fly." },
+    { displayName = "Unfly", name = "unfly", aliases = {}, description = "Stops player flight mechanics." },
+    { displayName = "Flyspeed", name = "flyspeed", aliases = {"flyws"}, description = "Sets player's fly speed." },
+    { displayName = "Clicktp", name = "clicktp", aliases = {}, description = "Enables teleportation constantly everywhere you click." },
+    { displayName = "Unclicktp", name = "unclicktp", aliases = {}, description = "Turns off click teleportation mechanics." },
+    { displayName = "Noclip", name = "noclip", aliases = {"np"}, description = "Makes the user able to clip through walls." },
+    { displayName = "Clip", name = "clip", aliases = {}, description = "Turns off player's noclip." },
+    { displayName = "Infinitejump", name = "infinitejump", aliases = {"infjump"}, description = "Makes the player able to infinitely jump." },
+    { displayName = "Uninfinitejump", name = "uninfinitejump", aliases = {"uninfjump"}, description = "Turns off infinite jumping." },
+    { displayName = "Spin", name = "spin", aliases = {}, description = "Spins the player and flings targets at chosen velocity speed value." },
+    { displayName = "Unspin", name = "unspin", aliases = {}, description = "Halts all current custom rotational velocity variables." },
+    { displayName = "Spinwhitelist", name = "spinwhitelist", aliases = {"spinwl"}, description = "Brings up server member layout window roster panel to manage immunity settings." }
+}
+
+-- 5. Main Help Roster Window UI
+local HelpFrame = Instance.new("Frame")
+HelpFrame.Name = "HelpFrame"
+HelpFrame.Size = UDim2.new(0, 390, 0, 400)
+HelpFrame.Position = UDim2.new(0.5, -195, 0.5, -200)
+HelpFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+HelpFrame.BackgroundTransparency = TRANSPARENCY_VAL
+HelpFrame.BorderSizePixel = 0
+HelpFrame.Visible = false
+HelpFrame.Active = true
+HelpFrame.Draggable = true
+HelpFrame.Parent = ScreenGui
+
+local HelpCorner = Instance.new("UICorner")
+HelpCorner.CornerRadius = UDim.new(0, 8)
+HelpCorner.Parent = HelpFrame
+
+local HelpStroke = Instance.new("UIStroke")
+HelpStroke.Color = Color3.fromRGB(80, 80, 80)
+HelpStroke.Thickness = 1
+HelpStroke.Parent = HelpFrame
+
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Name = "TitleLabel"
+TitleLabel.Size = UDim2.new(1, -70, 0, 35)
+TitleLabel.Position = UDim2.new(0, 15, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "SYSTEM COMMANDS"
+TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+TitleLabel.TextSize = 14
+TitleLabel.Font = Enum.Font.SourceSansBold
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Parent = HelpFrame
+
+local CloseButton = Instance.new("TextButton")
+CloseButton.Name = "CloseButton"
+CloseButton.Size = UDim2.new(0, 35, 0, 35)
+CloseButton.Position = UDim2.new(1, -35, 0, 0)
+CloseButton.BackgroundTransparency = 1
+CloseButton.Text = "✕"
+CloseButton.TextColor3 = Color3.fromRGB(180, 50, 50)
+CloseButton.TextSize = 16
+CloseButton.Font = Enum.Font.SourceSansBold
+CloseButton.Parent = HelpFrame
+
+local MinButton = Instance.new("TextButton")
+MinButton.Name = "MinButton"
+MinButton.Size = UDim2.new(0, 35, 0, 35)
+MinButton.Position = UDim2.new(1, -70, 0, 0)
+MinButton.BackgroundTransparency = 1
+MinButton.Text = "—"
+MinButton.TextColor3 = Color3.fromRGB(200, 200, 200)
+MinButton.TextSize = 14
+MinButton.Font = Enum.Font.SourceSansBold
+MinButton.Parent = HelpFrame
+
+local ScrollFrame = Instance.new("ScrollingFrame")
+ScrollFrame.Name = "ScrollFrame"
+ScrollFrame.Size = UDim2.new(1, -20, 1, -50)
+ScrollFrame.Position = UDim2.new(0, 10, 0, 40)
+ScrollFrame.BackgroundTransparency = 1
+ScrollFrame.BorderSizePixel = 0
+ScrollFrame.ScrollBarThickness = 4
+ScrollFrame.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 100)
+ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+ScrollFrame.Parent = HelpFrame
+
+local UIListLayout = Instance.new("UIListLayout")
+UIListLayout.Padding = UDim.new(0, 5)
+UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+UIListLayout.Parent = ScrollFrame
+
+local function addCommandToHelpMenu(cmdData)
+    local aliasText = ""
+    if cmdData.aliases and #cmdData.aliases > 0 then
+        aliasText = " (Alias: " .. table.concat(cmdData.aliases, ", ") .. ")"
+    end
+    local item = Instance.new("TextLabel")
+    item.Size = UDim2.new(1, -10, 0, 30)
+    item.BackgroundTransparency = 1
+    item.Text = "  " .. cmdData.displayName .. aliasText .. " - " .. cmdData.description
+    item.TextColor3 = Color3.fromRGB(220, 220, 220)
+    item.TextSize = 14
+    item.Font = Enum.Font.SourceSans
+    item.TextXAlignment = Enum.TextXAlignment.Left
+    item.Parent = ScrollFrame
+    ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, UIListLayout.AbsoluteContentSize.Y + 20)
+end
+
+for _, cmdData in ipairs(commandDatabase) do
+    addCommandToHelpMenu(cmdData)
+end
+
+CloseButton.MouseButton1Click:Connect(function() HelpFrame.Visible = false end)
+
+local isMinimized = false
+local originalHeight = HelpFrame.Size.Y.Offset
+MinButton.MouseButton1Click:Connect(function()
+    isMinimized = not isMinimized
+    if isMinimized then
+        ScrollFrame.Visible = false
+        HelpFrame:TweenSize(UDim2.new(0, 390, 0, 35), "Out", "Quad", 0.15, true)
+    else
+        HelpFrame:TweenSize(UDim2.new(0, 390, 0, originalHeight), "Out", "Quad", 0.15, true, function()
+            ScrollFrame.Visible = true
+        end)
+    end
+end)
+
+-- 6. Whitelist Interface Panel (Dynamic Roster Sync Engine)
+local WhitelistFrame = Instance.new("Frame")
+WhitelistFrame.Name = "WhitelistFrame"
+WhitelistFrame.Size = UDim2.new(0, 350, 0, 400)
+WhitelistFrame.Position = UDim2.new(0.5, 200, 0.5, -200) -- Offset slightly from help panel layout
+WhitelistFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+WhitelistFrame.BackgroundTransparency = TRANSPARENCY_VAL
+WhitelistFrame.BorderSizePixel = 0
+WhitelistFrame.Visible = false
+WhitelistFrame.Active = true
+WhitelistFrame.Draggable = true
+WhitelistFrame.Parent = ScreenGui
+
+local WlCorner = Instance.new("UICorner")
+WlCorner.CornerRadius = UDim.new(0, 8)
+WlCorner.Parent = WhitelistFrame
+
+local WlStroke = Instance.new("UIStroke")
+WlStroke.Color = Color3.fromRGB(80, 80, 80)
+WlStroke.Thickness = 1
+WlStroke.Parent = WhitelistFrame
+
+local WlTitle = Instance.new("TextLabel")
+WlTitle.Name = "WlTitle"
+WlTitle.Size = UDim2.new(1, -110, 0, 35)
+WlTitle.Position = UDim2.new(0, 15, 0, 0)
+WlTitle.BackgroundTransparency = 1
+WlTitle.Text = "SPIN WHITELIST ROSTER"
+WlTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+WlTitle.TextSize = 14
+WlTitle.Font = Enum.Font.SourceSansBold
+WlTitle.TextXAlignment = Enum.TextXAlignment.Left
+WlTitle.Parent = WhitelistFrame
+
+local WlClose = Instance.new("TextButton")
+WlClose.Name = "WlClose"
+WlClose.Size = UDim2.new(0, 35, 0, 35)
+WlClose.Position = UDim2.new(1, -35, 0, 0)
+WlClose.BackgroundTransparency = 1
+WlClose.Text = "✕"
+WlClose.TextColor3 = Color3.fromRGB(180, 50, 50)
+WlClose.TextSize = 16
+WlClose.Font = Enum.Font.SourceSansBold
+WlClose.Parent = WhitelistFrame
+
+local WlMin = Instance.new("TextButton")
+WlMin.Name = "WlMin"
+WlMin.Size = UDim2.new(0, 35, 0, 35)
+WlMin.Position = UDim2.new(1, -70, 0, 0)
+WlMin.BackgroundTransparency = 1
+WlMin.Text = "—"
+WlMin.TextColor3 = Color3.fromRGB(200, 200, 200)
+WlMin.TextSize = 14
+WlMin.Font = Enum.Font.SourceSansBold
+WlMin.Parent = WhitelistFrame
+
+local WlRefresh = Instance.new("TextButton")
+WlRefresh.Name = "WlRefresh"
+WlRefresh.Size = UDim2.new(0, 35, 0, 35)
+WlRefresh.Position = UDim2.new(1, -105, 0, 0)
+WlRefresh.BackgroundTransparency = 1
+WlRefresh.Text = "⟳"
+WlRefresh.TextColor3 = Color3.fromRGB(50, 180, 50)
+WlRefresh.TextSize = 18
+WlRefresh.Font = Enum.Font.SourceSansBold
+WlRefresh.Parent = WhitelistFrame
+
+local WlScroll = Instance.new("ScrollingFrame")
+WlScroll.Name = "WlScroll"
+WlScroll.Size = UDim2.new(1, -20, 1, -50)
+WlScroll.Position = UDim2.new(0, 10, 0, 40)
+WlScroll.BackgroundTransparency = 1
+WlScroll.BorderSizePixel = 0
+WlScroll.ScrollBarThickness = 4
+WlScroll.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 100)
+WlScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+WlScroll.Parent = WhitelistFrame
+
+local WlListLayout = Instance.new("UIListLayout")
+WlListLayout.Padding = UDim.new(0, 5)
+WlListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+WlListLayout.Parent = WlScroll
+
+local function refreshWhitelistRoster()
+    for _, child in ipairs(WlScroll:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local row = Instance.new("TextButton")
+            row.Size = UDim2.new(1, -10, 0, 30)
+            row.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+            row.BackgroundTransparency = state.whitelistedUsers[player.Name] and 0 or 1
+            row.Text = "   " .. player.Name
+            row.TextColor3 = state.whitelistedUsers[player.Name] and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(220, 220, 220)
+            row.TextSize = 14
+            row.Font = Enum.Font.SourceSans
+            row.TextXAlignment = Enum.TextXAlignment.Left
+            row.Parent = WlScroll
+            
+            local rowCorner = Instance.new("UICorner")
+            rowCorner.CornerRadius = UDim.new(0, 4)
+            rowCorner.Parent = row
+            
+            row.MouseButton1Click:Connect(function()
+                if state.whitelistedUsers[player.Name] then
+                    state.whitelistedUsers[player.Name] = nil
+                    row.BackgroundTransparency = 1
+                    row.TextColor3 = Color3.fromRGB(220, 220, 220)
+                else
+                    state.whitelistedUsers[player.Name] = true
+                    row.BackgroundTransparency = 0
+                    row.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+                    row.TextColor3 = Color3.fromRGB(255, 255, 255)
+                end
+            end)
+        end
+    end
+    WlScroll.CanvasSize = UDim2.new(0, 0, 0, WlListLayout.AbsoluteContentSize.Y + 20)
+end
+
+WlRefresh.MouseButton1Click:Connect(refreshWhitelistRoster)
+
+local isWlMinimized = false
+local wlOriginalHeight = WhitelistFrame.Size.Y.Offset
+WlMin.MouseButton1Click:Connect(function()
+    isWlMinimized = not isWlMinimized
+    if isWlMinimized then
+        WlScroll.Visible = false
+        WhitelistFrame:TweenSize(UDim2.new(0, 350, 0, 35), "Out", "Quad", 0.15, true)
+    else
+        WhitelistFrame:TweenSize(UDim2.new(0, 350, 0, wlOriginalHeight), "Out", "Quad", 0.15, true, function()
+            WlScroll.Visible = true
+        end)
+    end
+end)
+
+WlClose.MouseButton1Click:Connect(function() WhitelistFrame.Visible = false end)
+
+-- 7. Toggle UI Logic Engine
+local isOpen = false
+local function toggleCommandBar()
+    isOpen = not isOpen
+    if isOpen then
+        MainFrame.Visible = true
+        TweenService:Create(MainFrame, TweenInfo.new(0.2), {BackgroundTransparency = TRANSPARENCY_VAL}):Play()
+        TweenService:Create(UIStroke, TweenInfo.new(0.2), {Transparency = TRANSPARENCY_VAL}):Play()
+        TweenService:Create(TextBox, TweenInfo.new(0.2), {TextTransparency = 0}):Play()
+        TweenService:Create(SuggestionLabel, TweenInfo.new(0.2), {TextTransparency = 0}):Play()
+        task.wait(0.05)
+        TextBox:CaptureFocus()
+        TextBox.Text = ""
+    else
+        SuggestionLabel.Text = ""
+        local t1 = TweenService:Create(MainFrame, TweenInfo.new(0.2), {BackgroundTransparency = 1})
+        local t2 = TweenService:Create(UIStroke, TweenInfo.new(0.2), {Transparency = 1})
+        local t3 = TweenService:Create(TextBox, TweenInfo.new(0.2), {TextTransparency = 1})
+        local t4 = TweenService:Create(SuggestionLabel, TweenInfo.new(0.2), {TextTransparency = 1})
+        t1:Play() t2:Play() t3:Play() t4:Play()
+        TextBox:ReleaseFocus()
+        t1.Completed:Connect(function()
+            if not isOpen then MainFrame.Visible = false end
+        end)
+    end
+end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if input.KeyCode == TOGGLE_KEY and not gameProcessed then
+        toggleCommandBar()
+    end
+end)
+
+-- Live Predictive Autofill Target Storage
+local currentAutofillTarget = ""
+-- Live Predictive Auto-Suggestion Processor
+TextBox:GetPropertyChangedSignal("Text"):Connect(function()
+    local text = TextBox.Text
+    local segments = string.split(text, " ")
+    local searchStr = segments[1]:lower()
+    if searchStr ~= "" then
+        local foundMatch = false
+        for _, cmdData in ipairs(commandDatabase) do
+            local matchTarget = nil
+            if string.sub(cmdData.name, 1, string.len(searchStr)) == searchStr then
+                matchTarget = cmdData.name
+            else
+                for _, alias in ipairs(cmdData.aliases) do
+                    if string.sub(alias, 1, string.len(searchStr)) == searchStr then
+                        matchTarget = alias
+                        break
+                    end
+                end
+            end
+            if matchTarget then
+                local remainingArgs = ""
+                if #segments > 1 then
+                    remainingArgs = " " .. table.concat(segments, " ", 2)
+                end
+                SuggestionLabel.Text = searchStr .. string.sub(matchTarget, string.len(searchStr) + 1) .. remainingArgs
+                currentAutofillTarget = matchTarget .. remainingArgs
+                foundMatch = true
+                break
+            end
+        end
+        if not foundMatch then
+            SuggestionLabel.Text = ""
+            currentAutofillTarget = ""
+        end
+    else
+        SuggestionLabel.Text = ""
+        currentAutofillTarget = ""
+    end
+end)
+
+-- Tab Completion Capturer
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if input.KeyCode == Enum.KeyCode.Tab and TextBox:HasFocus() then
+        if currentAutofillTarget ~= "" then
+            TextBox.Text = currentAutofillTarget
+            TextBox.CursorPosition = string.len(TextBox.Text) + 1
+            SuggestionLabel.Text = ""
+        end
+    end
+end)
+
+-- 8. Core Command Interpreter Engine
+TextBox.FocusLost:Connect(function(enterPressed)
+    if enterPressed then
+        local rawText = TextBox.Text
+        local segments = string.split(rawText, " ")
+        local baseCommandClean = segments[1]:lower()
+        local numericArg = tonumber(segments[2])
+        for _, cmdData in ipairs(commandDatabase) do
+            local isMatch = (baseCommandClean == cmdData.name)
+            if not isMatch then
+                for _, alias in ipairs(cmdData.aliases) do
+                    if baseCommandClean == alias then
+                        isMatch = true
+                        break
+                    end
+                end
+            end
+            if isMatch then
+                local char = LocalPlayer.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                if cmdData.name == "commands" then
+                    HelpFrame.Visible = true
+                elseif cmdData.name == "speed" and numericArg then
+                    state.loopSpeed = nil
+                    if hum then hum.WalkSpeed = numericArg end
+                elseif cmdData.name == "jumppower" and numericArg then
+                    state.loopJump = nil
+                    if hum then
+                        hum.JumpPower = numericArg
+                        hum.UseJumpPower = true
+                    end
+                elseif cmdData.name == "loopws" and numericArg then
+                    state.loopSpeed = numericArg
+                elseif cmdData.name == "loopjp" and numericArg then
+                    state.loopJump = numericArg
+                elseif cmdData.name == "unloopws" then
+                    state.loopSpeed = nil
+                    if hum then hum.WalkSpeed = 16 end
+                elseif cmdData.name == "unloopjp" then
+                    state.loopJump = nil
+                    if hum then hum.JumpPower = 50 end
+                elseif cmdData.name == "fly" then
+                    if not state.isFlying and root then
+                        state.isFlying = true
+                        state.flyBV = Instance.new("BodyVelocity")
+                        state.flyBV.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+                        state.flyBV.Velocity = Vector3.new(0, 0, 0)
+                        state.flyBV.Parent = root
+                        state.flyBG = Instance.new("BodyGyro")
+                        state.flyBG.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
+                        state.flyBG.CFrame = root.CFrame
+                        state.flyBG.Parent = root
+                    end
+                elseif cmdData.name == "unfly" then
+                    stopFlying()
+                elseif cmdData.name == "flyspeed" and numericArg then
+                    state.flySpeed = numericArg
+                elseif cmdData.name == "clicktp" then
+                    stopClickTP()
+                    state.isClickTPing = true
+                    local mouse = LocalPlayer:GetMouse()
+                    state.clickConnection = mouse.Button1Down:Connect(function()
+                        local currentRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                        if currentRoot and mouse.Hit then
+                            currentRoot.CFrame = CFrame.new(mouse.Hit.Position + Vector3.new(0, 3, 0))
+                        end
+                    end)
+                elseif cmdData.name == "unclicktp" then
+                    stopClickTP()
+                elseif cmdData.name == "noclip" then
+                    state.isNoclipping = true
+                elseif cmdData.name == "clip" then
+                    state.isNoclipping = false
+                elseif cmdData.name == "infinitejump" then
+                    if state.infJumpConnection then state.infJumpConnection:Disconnect() end
+                    state.infJumpConnection = UserInputService.JumpRequest:Connect(function()
+                        local cHum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                        if cHum then cHum:ChangeState(Enum.HumanoidStateType.Jumping) end
+                    end)
+                elseif cmdData.name == "uninfinitejump" then
+                    if state.infJumpConnection then state.infJumpConnection:Disconnect() state.infJumpConnection = nil end
+                elseif cmdData.name == "spin" then
+                    stopSpinning()
+                    if root then
+                        state.isSpinning = true
+                        state.spinSpeed = numericArg or 100
+                        
+                        -- Create a base attachment if one doesn't exist
+                        local att = root:FindFirstChild("SpinAttachment") or Instance.new("Attachment")
+                        att.Name = "SpinAttachment"
+                        att.Parent = root
+                        
+                        -- 1. Upright Gyro Stabilizer (Keeps you perfectly standing)
+                        state.spinGyro = Instance.new("AlignOrientation")
+                        state.spinGyro.Name = "SpinStabilizer"
+                        state.spinGyro.Mode = Enum.OrientationMode.OneAttachment
+                        state.spinGyro.Attachment0 = att
+                        -- Allow infinite force to hold you straight up, but don't resist the Y rotation axis
+                        state.spinGyro.MaxTorque = math.huge
+                        state.spinGyro.Responsiveness = 200
+                        state.spinGyro.CFrame = CFrame.new(root.Position, root.Position + Vector3.new(0, 1, 0))
+                        state.spinGyro.Parent = root
+                        
+                        -- 2. Rotational Velocity Generator
+                        state.spinVelocity = Instance.new("AngularVelocity")
+                        state.spinVelocity.Name = "SpinVelocity"
+                        state.spinVelocity.Attachment0 = att
+                        state.spinVelocity.MaxTorque = math.huge
+                        state.spinVelocity.AngularVelocity = Vector3.new(0, state.spinSpeed, 0)
+                        state.spinVelocity.Parent = root
+                        
+                        -- 3. Invisible Fling Box Setup
+                        state.flingPart = Instance.new("Part")
+                        state.flingPart.Size = Vector3.new(4.5, 4.5, 4.5)
+                        state.flingPart.Transparency = 1
+                        state.flingPart.CanCollide = false
+                        state.flingPart.Massless = true
+                        state.flingPart.Parent = char
+                        
+                        local motor = Instance.new("Motor6D")
+                        motor.Part0 = root
+                        motor.Part1 = state.flingPart
+                        motor.C0 = CFrame.new(0,0,0)
+                        motor.Parent = state.flingPart
+                        
+                        state.flingPart.Touched:Connect(function(hit)
+                            if not state.isSpinning then return end
+                            local tChar = hit.Parent
+                            local tPlayer = Players:GetPlayerFromCharacter(tChar)
+                            if tPlayer and tPlayer ~= LocalPlayer and not state.whitelistedUsers[tPlayer.Name] then
+                                local tRoot = tChar:FindFirstChild("HumanoidRootPart")
+                                if tRoot then 
+                                    tRoot.AssemblyLinearVelocity = Vector3.new(math.random(-5000, 5000), 5000, math.random(-5000, 5000)) 
+                                end
+                            end
+                        end)
+                    end
+                elseif cmdData.name == "unspin" then
+                    stopSpinning()
+                elseif cmdData.name == "spinwhitelist" then
+                    WhitelistFrame.Visible = true
+                    refreshWhitelistRoster()
+                end
+                break
+            end
+        end
+    end
+    if isOpen then
+        toggleCommandBar()
+    end
+end)
